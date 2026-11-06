@@ -1,5 +1,6 @@
+import { spawn } from 'node:child_process';
 import { bw, BwError, withBwLock } from './bw.js';
-import { CONFIG, readConfig, validateServerUrl } from './config.js';
+import { CONFIG, parseCommand, readConfig, validateServerUrl } from './config.js';
 import { log } from './log.js';
 import { prompt, PromptError } from './prompt.js';
 import { clearAll as clearPending } from './pending.js';
@@ -85,6 +86,83 @@ export function forgetSession(): void {
   clearPending();
   fireLock();
   log.audit('session_rejected_by_cli');
+}
+
+let recovering: Promise<boolean> | null = null;
+
+/** True when a session command is configured, so a locked vault can be reopened unattended. */
+export function canRecover(): boolean {
+  return Boolean(CONFIG.sessionCmd);
+}
+
+/**
+ * Reopens the vault with the configured session command, after the CLI refused this
+ * process's key or the vault was found locked.
+ *
+ * Concurrent callers share one attempt. The command is expected to hand out the key every
+ * instance on the machine shares, unlocking only when that key no longer works, so a burst of
+ * instances recovering at once does not turn into a burst of unlocks retiring each other's keys.
+ */
+export function recoverSession(): Promise<boolean> {
+  if (!CONFIG.sessionCmd) return Promise.resolve(false);
+  if (!recovering) {
+    recovering = doRecover().finally(() => {
+      recovering = null;
+    });
+  }
+  return recovering;
+}
+
+async function doRecover(): Promise<boolean> {
+  const target = parseCommand(CONFIG.sessionCmd);
+  if (!target) return false;
+  let key: string;
+  try {
+    key = (await runSessionCmd(target)).trim();
+  } catch (e) {
+    log.warn('session command failed', { error: e instanceof Error ? e.message : String(e) });
+    return false;
+  }
+  if (!key || /\s/.test(key)) {
+    log.warn('session command printed no usable key');
+    return false;
+  }
+  const previous = sessionKey;
+  sessionKey = key;
+  if (await verifyUnlocked()) {
+    lastActivity = Date.now();
+    armIdleTimer();
+    log.audit('session_recovered');
+    return true;
+  }
+  sessionKey = previous;
+  log.warn('the key from the session command does not unlock the vault');
+  return false;
+}
+
+function runSessionCmd(target: { cmd: string; args: string[] }): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.BW_SESSION;
+    const child = spawn(target.cmd, target.args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env });
+    let out = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('timed out'));
+    }, 120_000);
+    child.stdout.on('data', (d: Buffer) => {
+      if (out.length < 4096) out += d.toString('utf8');
+    });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out);
+      else reject(new Error(`exit ${code}`));
+    });
+  });
 }
 
 export function touch(): void {
@@ -183,6 +261,7 @@ export async function status(): Promise<Status> {
   if (!configured) return { state: 'unconfigured', ...base };
   if (s.status === 'unauthenticated' || !s.userId) return { state: 'unauthenticated', ...base };
   if (sessionKey) return { state: 'unlocked', ...base };
+  if (canRecover() && (await recoverSession())) return { state: 'unlocked', ...base };
   return { state: 'locked', ...base };
 }
 

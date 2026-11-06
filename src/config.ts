@@ -94,6 +94,18 @@ export const CONFIG = {
    * hosts without MCP Apps cards (Claude Code), where a draft could never be saved.
    */
   directCreate: flag('VW_MCP_DIRECT_CREATE'),
+  /**
+   * Leave the CLI unlocked when this process ends. Several instances can share one CLI data
+   * directory (Claude Code starts one per session), and `bw lock` on exit would lock it for
+   * every other instance still running.
+   */
+  keepUnlockedOnExit: flag('VW_MCP_KEEP_UNLOCKED_ON_EXIT'),
+  /**
+   * A command that prints a working session key on stdout. When a call finds the vault locked
+   * (another instance locked it, or unlocked it again and so retired this process's key), the
+   * server runs it once, adopts the key and retries the call instead of failing it.
+   */
+  sessionCmd: (process.env.VW_MCP_SESSION_CMD ?? '').trim(),
   /** Organisation new logins go to (the user only sees items shared via an org collection). */
   defaultOrgId: (process.env.VW_MCP_DEFAULT_ORG ?? '').trim(),
   /** Collection ids (comma-separated) new logins go to; required with an organisation. */

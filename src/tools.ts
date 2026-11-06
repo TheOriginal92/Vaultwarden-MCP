@@ -110,7 +110,19 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 async function run(name: string, body: () => Promise<CallToolResult>): Promise<CallToolResult> {
   const t0 = Date.now();
   try {
-    const r = await withTimeout(body(), TOOL_TIMEOUT_MS, name);
+    let r: CallToolResult;
+    try {
+      r = await withTimeout(body(), TOOL_TIMEOUT_MS, name);
+    } catch (e) {
+      // Another instance on this machine locked the shared CLI or retired this process's key.
+      // With a session command configured that is recoverable: reopen once, then retry once.
+      if (!(e instanceof BwError && e.code === 'locked' && session.canRecover())) throw e;
+      session.forgetSession();
+      vault.invalidateCache();
+      if (!(await session.recoverSession())) throw e;
+      log.info(`tool ${name} retried after recovering the session`);
+      r = await withTimeout(body(), TOOL_TIMEOUT_MS, name);
+    }
     log.info(`tool ${name}`, { ms: Date.now() - t0, error: r.isError === true });
     return r;
   } catch (e) {

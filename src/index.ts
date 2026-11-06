@@ -166,7 +166,10 @@ async function main(): Promise<void> {
     // Losing this process loses the session key anyway, so the lock is about the CLI's own
     // state on disk rather than about this process's memory.
     await Promise.race([
-      Promise.all([session.lock().catch(() => undefined), flushClipboardClears().catch(() => undefined)]),
+      Promise.all([
+        (CONFIG.keepUnlockedOnExit ? Promise.resolve() : session.lock()).catch(() => undefined),
+        flushClipboardClears().catch(() => undefined),
+      ]),
       new Promise((r) => setTimeout(r, 4000)),
     ]);
     process.exit(0);
